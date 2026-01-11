@@ -8,6 +8,10 @@ Production-ready n8n workflow for automated invoice ingestion, classification, e
 
 \## Overview
 
+\## Workflow Overview
+
+![Workflow overview](screenshots/workflow-overview.png)
+
 
 
 This workflow automatically processes invoices uploaded to a Google Drive folder.  
