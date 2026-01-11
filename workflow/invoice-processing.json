@@ -1,0 +1,182 @@
+{
+  "name": "Invoice processing",
+  "nodes": [
+    {
+      "id": "google_drive_trigger",
+      "name": "Google Drive Trigger",
+      "type": "n8n-nodes-base.googleDriveTrigger",
+      "typeVersion": 1,
+      "position": [-1440, -8],
+      "parameters": {
+        "pollTimes": { "item": [{ "mode": "everyMinute" }] },
+        "triggerOn": "specificFolder",
+        "folderToWatch": {
+          "__rl": true,
+          "value": "FOLDER_ID_INPUT",
+          "mode": "id"
+        },
+        "event": "fileCreated"
+      }
+    },
+    {
+      "id": "download_file",
+      "name": "Download file",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [-1216, -8],
+      "parameters": {
+        "operation": "download",
+        "fileId": {
+          "__rl": true,
+          "value": "={{ $json.id }}",
+          "mode": "id"
+        }
+      }
+    },
+    {
+      "id": "extract_text_pdf",
+      "name": "Extract Text from PDF",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [-768, -152],
+      "parameters": { "operation": "pdf" }
+    },
+    {
+      "id": "check_pdf_scanned",
+      "name": "Check PDF/Scanned PDF",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-544, -152],
+      "parameters": {
+        "jsCode": "const text = ($json.text || '').toLowerCase();\nconst cleaned = text.replace(/file:\\/\\/\\S+/g, '').replace(/[a-z0-9_-]+\\.(jpg|jpeg|png|tiff|bmp|pdf)/g, '').replace(/\\b\\d{2,4}[x×]\\d{2,4}\\b/g, '').replace(/\\d{1,2}:\\d{2}/g, '').replace(/\\d{2}\\/\\d{2}\\/\\d{4}/g, '').trim();\nconst letters = cleaned.replace(/[^a-záéíóúüñ]/gi, '');\nreturn [{ json: { ...$json, is_native_pdf: letters.length > 50, letter_count: letters.length } }];"
+      }
+    },
+    {
+      "id": "pdf_or_image",
+      "name": "PDF or image",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [-992, -80],
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.mimeType }}",
+              "rightValue": "application/pdf",
+              "operator": { "type": "string", "operation": "contains" }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "pdf_native_or_scanned",
+      "name": "PDF - Native or scanned",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [-320, -152],
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.is_native_pdf }}",
+              "operator": { "type": "boolean", "operation": "true" }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "llm_pdf",
+      "name": "LLM PDF Native",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1,
+      "position": [16, -320],
+      "parameters": {
+        "modelId": "gpt-4o-mini",
+        "messages": {
+          "values": [
+            {
+              "content": "You are an accounting assistant. Extract invoice fields from the text below. Return ONLY valid JSON.\n\nTEXT:\n{{ $json.text }}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "parse_output",
+      "name": "Parse Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, -80],
+      "parameters": {
+        "jsCode": "function extractJson(text){if(!text||typeof text!=='string')return{};const m=text.replace(/```json|```/g,'').match(/\\{[\\s\\S]*\\}/);if(!m)return{};try{return JSON.parse(m[0]);}catch{return{}}}\nconst out=[];for(const i of $input.all()){const t=i.json?.message?.content||i.json?.content?.parts?.[0]?.text||JSON.stringify(i.json);out.push({json:extractJson(t)});}return out;"
+      }
+    },
+    {
+      "id": "normalize_fields",
+      "name": "Normalize invoice fields",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [704, -80],
+      "parameters": {
+        "jsCode": "const d=$json;function nDate(v){if(!v)return null;const p=new Date(v);return isNaN(p)?null:p.toISOString().slice(0,10);}function nNum(v){if(typeof v==='number')return v;if(typeof v==='string'){const n=Number(v.replace(',', '.').replace(/[^\\d.-]/g,''));return isNaN(n)?null:n;}return null;}return {json:{date:nDate(d.date),invoice_number:d.invoice_number||null,vendor:d.vendor||null,tax_id:d.tax_id||null,subtotal:nNum(d.subtotal),tax:nNum(d.tax),total:nNum(d.total),currency:d.currency||null,description:d.description||null,is_valid:Boolean(nDate(d.date)&&nNum(d.total))}};"
+      }
+    },
+    {
+      "id": "append_sheet",
+      "name": "Append to Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [1152, -176],
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "SPREADSHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sheet1",
+          "mode": "list"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Date": "={{ $json.date }}",
+            "Invoice Number": "={{ $json.invoice_number }}",
+            "Vendor": "={{ $json.vendor }}",
+            "Tax ID": "={{ $json.tax_id }}",
+            "Subtotal": "={{ $json.subtotal }}",
+            "Tax": "={{ $json.tax }}",
+            "Total": "={{ $json.total }}",
+            "Currency": "={{ $json.currency }}",
+            "Description": "={{ $json.description }}"
+          }
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Google Drive Trigger": { "main": [[{ "node": "Download file", "type": "main" }]] },
+    "Download file": { "main": [[{ "node": "PDF or image", "type": "main" }]] },
+    "PDF or image": {
+      "main": [
+        [{ "node": "Extract Text from PDF", "type": "main" }],
+        [{ "node": "LLM PDF Native", "type": "main" }]
+      ]
+    },
+    "Extract Text from PDF": { "main": [[{ "node": "Check PDF/Scanned PDF", "type": "main" }]] },
+    "Check PDF/Scanned PDF": { "main": [[{ "node": "PDF - Native or scanned", "type": "main" }]] },
+    "PDF - Native or scanned": { "main": [[{ "node": "LLM PDF Native", "type": "main" }]] },
+    "LLM PDF Native": { "main": [[{ "node": "Parse Output", "type": "main" }]] },
+    "Parse Output": { "main": [[{ "node": "Normalize invoice fields", "type": "main" }]] },
+    "Normalize invoice fields": { "main": [[{ "node": "Append to Google Sheets", "type": "main" }]] }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Atlantic/Canary"
+  }
+}
